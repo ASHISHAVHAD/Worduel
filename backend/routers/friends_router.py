@@ -61,6 +61,11 @@ async def send_friend_request(target_id: str, token: str = Query(...)):
                 raise HTTPException(400, "Request already sent")
 
         req_id = str(uuid.uuid4())[:12]
+        # Clean up any old non-pending requests between these users
+        await conn.execute(
+            "DELETE FROM friend_requests WHERE ((from_user=$1 AND to_user=$2) OR (from_user=$2 AND to_user=$1)) AND status != 'pending'",
+            user_id, target_id
+        )
         await conn.execute(
             "INSERT INTO friend_requests (id, from_user, to_user) VALUES ($1, $2, $3)",
             req_id, user_id, target_id
@@ -156,6 +161,11 @@ async def remove_friend(friend_id: str, token: str = Query(...)):
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM friends WHERE (user_a=$1 AND user_b=$2) OR (user_a=$2 AND user_b=$1)",
+            user_id, friend_id
+        )
+        # Also clean up old request records so they can re-request
+        await conn.execute(
+            "DELETE FROM friend_requests WHERE (from_user=$1 AND to_user=$2) OR (from_user=$2 AND to_user=$1)",
             user_id, friend_id
         )
     return {"status": "removed"}

@@ -20,7 +20,7 @@ def generate_room_code() -> str:
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
-def create_room(mode: str, max_players: int, is_private: bool, creator_id: str) -> dict:
+def create_room(mode: str, max_players: int, is_private: bool, creator_id: str, is_matchmade: bool = False) -> dict:
     room_id = str(uuid.uuid4())[:8]
     room_code = generate_room_code()
     room = {
@@ -29,11 +29,13 @@ def create_room(mode: str, max_players: int, is_private: bool, creator_id: str) 
         "mode": mode,
         "max_players": max_players,
         "is_private": is_private,
+        "is_matchmade": is_matchmade,
         "creator": creator_id,
-        "host": creator_id,       # host can start game
+        "host": creator_id,
         "players": [],
         "player_names": {},
-        "status": "waiting",      # waiting | playing | finished
+        "ready_players": set(),  # for ready-up system
+        "status": "waiting",
         "game_state": None,
         "chat_messages": [],
         "spectator_count": 0,
@@ -220,7 +222,16 @@ def process_br_guess(room: dict, player_id: str, guess: str) -> dict:
         gs["finished_players"].append((player_id, 999))
         response["out_of_guesses"] = True
 
-    alive_not_done = [p for p in gs["alive_players"] if p not in [f[0] for f in gs["finished_players"]]]
+    finished_ids = [f[0] for f in gs["finished_players"]]
+    correct_ids = [f[0] for f in gs["finished_players"] if f[1] != 999]
+    alive_not_done = [p for p in gs["alive_players"] if p not in finished_ids]
+
+    # If n-1 out of n alive players have correctly guessed, eliminate the remaining one immediately
+    if len(alive_not_done) == 1 and len(correct_ids) == len(gs["alive_players"]) - 1:
+        last_player = alive_not_done[0]
+        gs["finished_players"].append((last_player, 999))
+        alive_not_done = []
+
     if not alive_not_done:
         response.update(resolve_br_round(room))
 
@@ -291,6 +302,7 @@ def init_pictionary(room: dict):
         "timer_end": 0,
         "turn_in_round": 0,
         "total_turns_per_round": len(room["players"]),
+        "drawing_history": [],  # stores all draw strokes for spectator catchup
     }
 
 
@@ -352,6 +364,7 @@ def advance_pictionary_turn(room: dict) -> dict:
     gs["drawer_index"] = (gs["drawer_index"] + 1) % len(room["players"])
     gs["current_drawer"] = room["players"][gs["drawer_index"]]
     gs["current_word"] = random_pictionary_word()
+    gs["drawing_history"] = []  # clear for new turn
 
     return {
         "type": "pictionary_new_turn",

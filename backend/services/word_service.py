@@ -1,33 +1,23 @@
-"""Word lists for all game modes."""
+"""Word lists loaded from text files."""
+import os
 import random
 
-WORDLE_WORDS = [
-    "APPLE", "BRAVE", "CRANE", "DANCE", "EAGLE", "FLAME", "GRAPE", "HOUSE",
-    "IMAGE", "JOKER", "KNIFE", "LEMON", "MAGIC", "NOBLE", "OCEAN", "PIANO",
-    "QUEEN", "RIVER", "STORM", "TIGER", "ULTRA", "VIVID", "WHALE", "XENON",
-    "YACHT", "ZEBRA", "BLAZE", "CHARM", "DRIFT", "EMBER", "FROST", "GHOST",
-    "HAVEN", "IVORY", "JEWEL", "KNACK", "LUNAR", "MARSH", "NERVE", "ORBIT",
-    "PEARL", "QUILT", "RADAR", "SHINE", "TORCH", "UNITY", "VIGOR", "WRIST",
-    "YOUTH", "ZESTY", "ABOUT", "BELOW", "CLEAR", "DREAM", "EVERY", "FLOAT",
-    "GREEN", "HEART", "INPUT", "JOINT", "KRAFT", "LIGHT", "MONEY", "NIGHT",
-    "OTHER", "PLACE", "QUIET", "RIGHT", "SOUND", "THINK", "UNDER", "VALUE",
-    "WORLD", "YOUNG", "ADAPT", "BLEND", "COVER", "DEPTH", "EXACT", "FRESH",
-    "GRANT", "HEAVY", "ISSUE", "JUDGE", "KNOWN", "LARGE", "MOUNT", "NORTH",
-    "OUTER", "POWER", "QUICK", "ROUND", "SHARP", "TOUCH", "UPPER", "VOCAL",
-    "WATCH", "OXIDE", "YIELD", "ZONES", "ALIEN", "BEACH", "CLIMB", "DODGE",
-    "ELITE", "FORGE", "GLOBE", "HOIST", "INDEX", "JOLLY", "KARMA", "LOTUS",
-    "MAPLE", "NUDGE", "OPTIC", "PLUMB", "QUEST", "REIGN", "SLEEK", "TRUCE",
-]
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
-PICTIONARY_WORDS = [
-    "ELEPHANT", "RAINBOW", "VOLCANO", "BICYCLE", "PIRATE", "DRAGON", "CASTLE",
-    "GUITAR", "OCTOPUS", "ROCKET", "PENGUIN", "TORNADO", "DIAMOND", "ANCHOR",
-    "COMPASS", "LANTERN", "BALLOON", "MONSTER", "SUNRISE", "CHICKEN", "HAMMER",
-    "ISLAND", "LADDER", "MAGNET", "PARROT", "SPIDER", "TROPHY", "WIZARD",
-    "CANDLE", "BRIDGE", "FOREST", "GARDEN", "HELMET", "JUNGLE", "KNIGHT",
-    "MIRROR", "PILLOW", "RABBIT", "SHIELD", "THRONE", "CAMERA", "PLANET",
-    "CASTLE", "FLOWER", "TURTLE", "BANANA", "CHERRY", "WINDOW", "BOTTLE",
-]
+
+def _load_words(filename: str) -> list:
+    path = os.path.join(DATA_DIR, filename)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Word file not found: {path}")
+    with open(path, "r") as f:
+        words = [line.strip().upper() for line in f if line.strip()]
+    if not words:
+        raise ValueError(f"Word file is empty: {path}")
+    return words
+
+
+WORDLE_WORDS = _load_words("wordle_words.txt")
+PICTIONARY_WORDS = _load_words("pictionary_words.txt")
 
 
 def random_wordle_word() -> str:
@@ -43,13 +33,11 @@ def evaluate_guess(guess: str, target: str) -> list:
     result = [{"letter": g, "status": "absent"} for g in guess]
     target_chars = list(target)
 
-    # First pass: correct positions
     for i in range(len(guess)):
         if i < len(target) and guess[i] == target[i]:
             result[i]["status"] = "correct"
             target_chars[i] = None
 
-    # Second pass: present but wrong position
     for i in range(len(guess)):
         if result[i]["status"] == "correct":
             continue
