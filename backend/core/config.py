@@ -9,7 +9,7 @@ DATABASE_URL = os.getenv(
 
 # App settings
 APP_TITLE = "Worduel API"
-CORS_ORIGINS = ["*"]
+CORS_ORIGINS = ["https://worduel-app.onrender.com", "http://localhost:3000",]
 ELO_K_FACTOR = 32
 PICTIONARY_DRAW_TIME = 60   # seconds to draw
 PICTIONARY_REVEAL_TIME = 5  # seconds countdown before next turn
