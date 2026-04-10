@@ -63,6 +63,12 @@ export default function SpectatorView({ roomId, onLeave }) {
         setRoomInfo(msg.room);
         setPlayers(msg.room?.players || []);
         setMode(msg.room?.mode);
+        if (msg.round) setRound(msg.round);
+        if (msg.scores) setScores(msg.scores);
+        if (msg.current_turn) setCurrentTurn(msg.current_turn);
+        if (msg.drawer) setDrawer(msg.drawer);
+        // Catchup: load existing guesses for duel/BR
+        if (msg.guesses) setGuesses(msg.guesses);
         break;
 
       case "game_started":
@@ -71,7 +77,15 @@ export default function SpectatorView({ roomId, onLeave }) {
         setRound(1);
         setGuesses({});
         setMatchResult(null);
-        if (msg.mode === "duel") setCurrentTurn(msg.current_turn);
+        if (msg.mode === "duel") {
+          setCurrentTurn(msg.current_turn);
+          setTimer(msg.turn_time || 60);
+          setTimerPhase("duel_turn");
+        }
+        if (msg.mode === "battle_royale") {
+          setTimer(msg.round_time || 120);
+          setTimerPhase("br_round");
+        }
         if (msg.mode === "pictionary") {
           setDrawer(msg.drawer);
           setTimer(msg.draw_time || 60);
@@ -90,6 +104,11 @@ export default function SpectatorView({ roomId, onLeave }) {
         if (msg.match_won) setMatchResult({ winnerName: msg.match_winner_name });
         break;
 
+      case "turn_timeout":
+        if (msg.next_turn) setCurrentTurn(msg.next_turn);
+        showNotif(`⏰ ${msg.player_name} ran out of time!`);
+        break;
+
       case "br_guess":
         if (msg.result) {
           setGuesses((prev) => ({
@@ -103,10 +122,19 @@ export default function SpectatorView({ roomId, onLeave }) {
         if (msg.match_over) setMatchResult({ winnerName: msg.match_winner_name });
         break;
 
+      case "br_timeout":
+        if (msg.eliminated_names?.length) showNotif(`⏰ Eliminated: ${msg.eliminated_names.join(", ")}`);
+        if (msg.match_over) setMatchResult({ winnerName: msg.match_winner_name });
+        break;
+
       case "new_round":
         setRound(msg.round);
         setGuesses({});
+        setRevealWord(null);
         if (msg.current_turn) setCurrentTurn(msg.current_turn);
+        if (msg.turn_time) setTimer(msg.turn_time);
+        if (msg.timer) setTimer(msg.timer);
+        setTimerPhase("active");
         showNotif(`Round ${msg.round}!`);
         break;
 
@@ -180,6 +208,10 @@ export default function SpectatorView({ roomId, onLeave }) {
       case "player_disconnected":
         setPlayers(msg.players || []);
         showNotif(`${msg.player_name} left`);
+        break;
+
+      case "game_terminated":
+        setMatchResult({ winnerName: msg.winner_name, reason: msg.reason });
         break;
 
       default:

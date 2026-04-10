@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { GuessBoard, Keyboard, ChatPanel, CircularTimer } from "../components/GameComponents";
 import DrawCanvas from "../components/DrawCanvas";
 
@@ -20,16 +20,20 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
   const [matchResult, setMatchResult] = useState(null);
   const [roundResults, setRoundResults] = useState(null);
 
-  // Timer state (shared across modes)
   const [timer, setTimer] = useState(0);
   const [timerTotal, setTimerTotal] = useState(60);
-  const [timerPhase, setTimerPhase] = useState("active"); // active | reveal
+  const [timerPhase, setTimerPhase] = useState("active");
 
-  // Pictionary state
   const [drawer, setDrawer] = useState(null);
   const [word, setWord] = useState(null);
   const [pictionaryInput, setPictionaryInput] = useState("");
   const [revealWord, setRevealWord] = useState(null);
+
+  const [isMatchmade, setIsMatchmade] = useState(false);
+  const [autoStartSeconds, setAutoStartSeconds] = useState(null);
+
+  // Pictionary correct guess popup
+  const [guessPopup, setGuessPopup] = useState(null);
 
   useEffect(() => {
     send({ action: "join_room", room_id: roomId });
@@ -51,17 +55,34 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
     });
   };
 
-  // ── Message handler ──────────────────────────────────────────────────
+  const processedCountRef = useRef(0);
+
   useEffect(() => {
     if (!gameMessages.length) return;
-    const msg = gameMessages[gameMessages.length - 1];
+    // Process all messages we haven't seen yet
+    const startIdx = processedCountRef.current;
+    if (startIdx >= gameMessages.length) return;
+    const newMessages = gameMessages.slice(startIdx);
+    processedCountRef.current = gameMessages.length;
 
+    for (const msg of newMessages) {
     switch (msg.type) {
+      case "match_found":
+        setMode(msg.mode);
+        setIsMatchmade(msg.is_matchmade || false);
+        if (msg.players) setPlayers(msg.players);
+        break;
+
       case "player_joined":
         setPlayers(msg.players || []);
         setHost(msg.host);
         setRoomInfo(msg.room);
         setMode(msg.room?.mode);
+        setIsMatchmade(msg.is_matchmade || false);
+        break;
+
+      case "auto_start_countdown":
+        setAutoStartSeconds(msg.seconds);
         break;
 
       case "game_started":
@@ -75,6 +96,8 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         setMatchResult(null);
         setRoundResults(null);
         setTimerPhase("active");
+        setAutoStartSeconds(null);
+        setGuessPopup(null);
         if (msg.mode === "duel") {
           setCurrentTurn(msg.current_turn);
           setTimerTotal(msg.turn_time || 60);
@@ -84,14 +107,13 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
           setTimer(msg.round_time || 120);
         } else if (msg.mode === "pictionary") {
           setDrawer(msg.drawer);
-          setWord(msg.word || null);
+          // word comes via separate drawer_word message
           setTimerTotal(msg.draw_time || 60);
           setTimer(msg.draw_time || 60);
           setRevealWord(null);
         }
         break;
 
-      // ── Timer (all modes) ──
       case "timer_tick":
         setTimer(msg.remaining);
         setTimerPhase("active");
@@ -102,7 +124,6 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         setTimerPhase("reveal");
         break;
 
-      // ── Duel messages ──
       case "duel_guess": {
         const guessData = msg.result;
         if (msg.player === user.user_id) {
@@ -135,7 +156,6 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         showNotif(`⏰ ${msg.player_name} ran out of time! ${msg.next_turn_name}'s turn.`);
         break;
 
-      // ── Battle Royale messages ──
       case "br_guess":
         if (msg.player === user.user_id && msg.result) {
           setMyGuesses((prev) => [...prev, msg.result]);
@@ -146,6 +166,11 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         if (msg.round_over) {
           setRoundResults({ eliminated: msg.eliminated_names, word: msg.target_word, alive: msg.alive_count });
           if (msg.eliminated_names?.length) showNotif(`Eliminated: ${msg.eliminated_names.join(", ")}`);
+          // If current user was eliminated, redirect after a delay
+          if (msg.eliminated?.includes(user.user_id)) {
+            showNotif("💀 You have been eliminated!");
+            setTimeout(() => onLeave(), 3000);
+          }
         }
         if (msg.match_over) {
           setMatchResult({ winner: msg.match_winner, winnerName: msg.match_winner_name });
@@ -155,12 +180,15 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
       case "br_timeout":
         setRoundResults({ eliminated: msg.eliminated_names, word: msg.target_word, alive: msg.alive_count });
         if (msg.eliminated_names?.length) showNotif(`⏰ Time's up! Eliminated: ${msg.eliminated_names.join(", ")}`);
+        if (msg.eliminated?.includes(user.user_id)) {
+          showNotif("💀 You have been eliminated!");
+          setTimeout(() => onLeave(), 3000);
+        }
         if (msg.match_over) {
           setMatchResult({ winner: msg.match_winner, winnerName: msg.match_winner_name });
         }
         break;
 
-      // ── Round transitions ──
       case "new_round":
         setRound(msg.round);
         setMyGuesses([]);
@@ -175,7 +203,6 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         showNotif(`Round ${msg.round} starting!`);
         break;
 
-      // ── Pictionary messages ──
       case "turn_ending":
         setRevealWord(msg.word);
         setTimerPhase("reveal");
@@ -186,20 +213,27 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
 
       case "pictionary_guess":
         if (msg.correct) {
-          showNotif(`🎉 ${msg.guesser_name} guessed it! Word: ${msg.word}`);
           if (msg.scores) setScores(msg.scores);
           setRevealWord(msg.word);
+          // Show popup with who guessed and points
+          setGuessPopup({
+            guesser: msg.guesser_name,
+            drawer: msg.drawer_name,
+            word: msg.word,
+          });
+          setTimeout(() => setGuessPopup(null), 5000);
         }
         break;
 
       case "pictionary_new_turn":
         setDrawer(msg.drawer);
-        setWord(msg.word || null);
+        setWord(null);  // word comes separately via drawer_word
         setRound(msg.round);
         setRevealWord(null);
         setTimerPhase("active");
         setTimerTotal(msg.draw_time || 60);
         setTimer(msg.draw_time || 60);
+        setGuessPopup(null);
         showNotif(`${msg.drawer_name}'s turn to draw!`);
         const canvas = window.__drawCanvas;
         if (canvas) {
@@ -207,6 +241,10 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
           ctx.fillStyle = "#1a1a2e";
           ctx.fillRect(0, 0, canvas.width, canvas.height);
         }
+        break;
+
+      case "drawer_word":
+        setWord(msg.word);
         break;
 
       case "pictionary_game_over":
@@ -230,11 +268,7 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
 
       case "clear_canvas": {
         const cv = window.__drawCanvas;
-        if (cv) {
-          const ctx = cv.getContext("2d");
-          ctx.fillStyle = "#1a1a2e";
-          ctx.fillRect(0, 0, cv.width, cv.height);
-        }
+        if (cv) { const ctx = cv.getContext("2d"); ctx.fillStyle = "#1a1a2e"; ctx.fillRect(0, 0, cv.width, cv.height); }
         break;
       }
 
@@ -249,20 +283,27 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         showNotif(`${msg.player_name} left`);
         break;
 
+      case "game_terminated":
+        setMatchResult({
+          winner: msg.winner, winnerName: msg.winner_name,
+          terminated: true, reason: msg.reason,
+          winners: msg.winners || null, scores: msg.scores || null,
+        });
+        break;
+
       case "error":
         showNotif(`⚠️ ${msg.message}`);
         break;
 
-      default:
-        break;
+      default: break;
     }
+    } // end for loop
   }, [gameMessages, user.user_id]);
 
-  // ── Keyboard handler ─────────────────────────────────────────────────
+  // ── Keyboard ──────────────────────────────────────────────────────────
   const handleKey = useCallback((key) => {
     if (matchResult) return;
     if (mode === "duel" && currentTurn !== user.user_id) return;
-
     if (key === "ENTER") {
       if (input.length === 5) {
         send({ action: mode === "duel" ? "duel_guess" : "br_guess", guess: input });
@@ -278,6 +319,8 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
   useEffect(() => {
     const handler = (e) => {
       if (mode === "pictionary") return;
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
       if (e.key === "Enter") handleKey("ENTER");
       else if (e.key === "Backspace") handleKey("⌫");
       else if (/^[a-zA-Z]$/.test(e.key)) handleKey(e.key.toUpperCase());
@@ -290,26 +333,15 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
   const isDrawer = mode === "pictionary" && drawer === user.user_id;
   const isHost = host === user.user_id;
 
-  // ── Render ───────────────────────────────────────────────────────────
   return (
     <div style={containerStyle}>
       {/* Header */}
-      <div style={{
-        padding: "12px 24px", display: "flex", justifyContent: "space-between",
-        alignItems: "center", borderBottom: "1px solid #1a1a3a",
-      }}>
+      <div style={{ padding: "12px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #1a1a3a" }}>
         <button onClick={onLeave} style={backBtnStyle}>← Leave</button>
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <span style={{ fontWeight: 700, fontSize: 16, textTransform: "uppercase", letterSpacing: 2 }}>
-            {mode === "duel" ? "⚔️ Duel" : mode === "battle_royale" ? "👑 Battle Royale" : "🎨 Pictionary"}
-            {status === "playing" && ` · Round ${round}`}
-          </span>
-          {/* Show timer in header for duel/BR */}
-          {status === "playing" && (mode === "duel" || mode === "battle_royale") && !matchResult && !roundResults && (
-            <CircularTimer remaining={timer} total={timerTotal} phase={timerPhase === "reveal" ? "reveal" : "active"}
-              label={mode === "duel" ? "Turn" : "Round"} />
-          )}
-        </div>
+        <span style={{ fontWeight: 700, fontSize: 16, textTransform: "uppercase", letterSpacing: 2 }}>
+          {mode === "duel" ? "⚔️ Duel" : mode === "battle_royale" ? "👑 Battle Royale" : "🎨 Pictionary"}
+          {status === "playing" && ` · Round ${round}`}
+        </span>
         <div style={{ fontSize: 13, color: "#64ffda" }}>{players.length} players</div>
       </div>
 
@@ -318,30 +350,61 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         <div style={{
           position: "fixed", top: 80, left: "50%", transform: "translateX(-50%)",
           padding: "12px 24px", borderRadius: 12,
-          background: "rgba(100, 255, 218, 0.15)", backdropFilter: "blur(10px)",
-          border: "1px solid #64ffda", color: "#64ffda",
-          fontWeight: 700, fontSize: 14, zIndex: 100,
+          background: "rgba(100,255,218,0.15)", backdropFilter: "blur(10px)",
+          border: "1px solid #64ffda", color: "#64ffda", fontWeight: 700, fontSize: 14, zIndex: 100,
         }}>
           {notification}
+        </div>
+      )}
+
+      {/* Pictionary correct guess popup */}
+      {guessPopup && (
+        <div style={{
+          position: "fixed", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+          padding: "32px 48px", borderRadius: 20, zIndex: 200,
+          background: "rgba(10,10,26,0.95)", border: "2px solid #64ffda",
+          boxShadow: "0 0 60px rgba(100,255,218,0.3)", textAlign: "center",
+        }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>🎉</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#64ffda", marginBottom: 8 }}>
+            {guessPopup.guesser} guessed it!
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: 4, color: "#ffd93d", marginBottom: 16 }}>
+            {guessPopup.word}
+          </div>
+          <div style={{ fontSize: 14, color: "#ccc" }}>
+            <span style={{ color: "#64ffda", fontWeight: 700 }}>{guessPopup.guesser}</span> earned <span style={{ color: "#ffd93d", fontWeight: 700 }}>+3 pts</span>
+            {" · "}
+            <span style={{ color: "#64ffda", fontWeight: 700 }}>{guessPopup.drawer}</span> earned <span style={{ color: "#ffd93d", fontWeight: 700 }}>+2 pts</span>
+          </div>
         </div>
       )}
 
       {/* ═══ WAITING ═══ */}
       {status === "waiting" && (
         <div style={{ textAlign: "center", padding: 48 }}>
-          <h2 style={{ fontSize: 28, fontWeight: 800, marginBottom: 16 }}>Waiting for Players</h2>
+          <h2 style={{ fontSize: 28, fontWeight: 800, marginBottom: 16 }}>
+            {isMatchmade ? "Match Found!" : "Waiting for Players"}
+          </h2>
+
+          {/* Players with ready indicators */}
           <div style={{ marginBottom: 24 }}>
             {players.map((p) => (
               <span key={p.id} style={{
                 display: "inline-block", padding: "8px 16px", borderRadius: 20,
-                background: "#12122a", border: `1px solid ${p.id === host ? "#64ffda" : "#333"}`,
+                background: "#12122a",
+                border: `1px solid ${p.id === host ? "#64ffda" : "#333"}`,
                 margin: 4, fontWeight: 600, fontSize: 14,
               }}>
-                {p.name} {p.id === user.user_id ? "(you)" : ""} {p.id === host ? "👑" : ""}
+                {p.name}
+                {p.id === user.user_id ? " (you)" : ""}
+                {p.id === host ? " 👑" : ""}
               </span>
             ))}
           </div>
-          {roomInfo?.code && (
+
+          {/* Room code (hidden for matchmade) */}
+          {roomInfo?.code && !isMatchmade && (
             <div style={{ marginBottom: 24 }}>
               <div style={{ color: "#888", fontSize: 13, marginBottom: 4 }}>Room Code:</div>
               <div style={{ fontSize: 32, fontWeight: 900, letterSpacing: 8, color: "#64ffda", fontFamily: "monospace" }}>
@@ -349,34 +412,45 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
               </div>
             </div>
           )}
-          {isHost ? (
-            <button onClick={() => send({ action: "start_game" })} style={startBtnStyle}>
-              START GAME
-            </button>
-          ) : (
-            <div style={{ color: "#888", fontSize: 14, fontStyle: "italic" }}>
-              Waiting for host to start the game...
+
+          {/* Auto-start countdown for matchmade duel */}
+          {isMatchmade && mode === "duel" && autoStartSeconds && (
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: 48, fontWeight: 900, color: "#ffd93d", fontFamily: "'JetBrains Mono', monospace" }}>
+                {autoStartSeconds}
+              </div>
+              <div style={{ color: "#888", fontSize: 13 }}>Match starting...</div>
             </div>
           )}
+
+          {/* Host start button — for duel (manual), pictionary, battle_royale */}
+          {!isMatchmade || mode !== "duel" ? (
+            isHost ? (
+              <div>
+                <button onClick={() => send({ action: "start_game" })} style={startBtnStyle}>
+                  START GAME
+                </button>
+                {mode !== "duel" && players.length < 3 && (
+                  <div style={{ color: "#ff6b6b", fontSize: 13, marginTop: 8 }}>Need at least 3 players</div>
+                )}
+              </div>
+            ) : (
+              <div style={{ color: "#888", fontSize: 14, fontStyle: "italic" }}>
+                Waiting for host to start the game...
+              </div>
+            )
+          ) : null}
         </div>
       )}
 
       {/* ═══ DUEL / BATTLE ROYALE ═══ */}
       {status === "playing" && (mode === "duel" || mode === "battle_royale") && (
         <div style={{ padding: "24px", maxWidth: 900, margin: "0 auto" }}>
-          {/* Timer bar */}
           {timerPhase === "active" && !matchResult && !roundResults && (
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
-              <CircularTimer
-                remaining={timer}
-                total={timerTotal}
-                phase={timerPhase}
-                label={mode === "duel" ? "Turn" : "Round"}
-              />
+              <CircularTimer remaining={timer} total={timerTotal} phase={timerPhase} label={mode === "duel" ? "Turn" : "Round"} />
             </div>
           )}
-
-          {/* Reveal countdown overlay */}
           {timerPhase === "reveal" && (
             <div style={{ textAlign: "center", marginBottom: 16 }}>
               <CircularTimer remaining={timer} total={5} phase="reveal" label="Next round in..." />
@@ -385,24 +459,16 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
 
           <div style={{ display: "grid", gridTemplateColumns: mode === "duel" ? "1fr 1fr" : "1fr", gap: 32 }}>
             <div style={{ textAlign: "center" }}>
-              <div style={{
-                fontSize: 14, fontWeight: 700, marginBottom: 12,
-                color: isMyTurn ? "#64ffda" : "#666",
-              }}>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: isMyTurn ? "#64ffda" : "#666" }}>
                 {user.username} {isMyTurn && mode === "duel" ? "• YOUR TURN" : ""}
                 {mode === "duel" && ` (${scores[user.user_id] || 0} wins)`}
               </div>
               <GuessBoard guesses={myGuesses} currentInput={isMyTurn ? input : ""} />
             </div>
-
             {mode === "duel" && players.filter((p) => p.id !== user.user_id).map((opp) => (
               <div key={opp.id} style={{ textAlign: "center" }}>
-                <div style={{
-                  fontSize: 14, fontWeight: 700, marginBottom: 12,
-                  color: currentTurn === opp.id ? "#ff6b6b" : "#666",
-                }}>
-                  {opp.name} {currentTurn === opp.id ? "• THEIR TURN" : ""}
-                  {` (${scores[opp.id] || 0} wins)`}
+                <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: currentTurn === opp.id ? "#ff6b6b" : "#666" }}>
+                  {opp.name} {currentTurn === opp.id ? "• THEIR TURN" : ""} {` (${scores[opp.id] || 0} wins)`}
                 </div>
                 <GuessBoard guesses={opponentGuesses[opp.id] || []} small />
               </div>
@@ -417,9 +483,7 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
                 {roundResults.word && `Word was: ${roundResults.word}`}
                 {roundResults.eliminated?.length > 0 && ` · Eliminated: ${roundResults.eliminated.join(", ")}`}
               </div>
-              <button onClick={() => send({ action: "next_round" })} style={actionBtnStyle}>
-                Next Round →
-              </button>
+              <div style={{ color: "#ffd93d", fontSize: 14, fontWeight: 600 }}>Next round starting soon...</div>
             </div>
           )}
 
@@ -432,16 +496,10 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         <div style={{ padding: "24px", maxWidth: 960, margin: "0 auto" }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 24 }}>
             <div>
-              <div style={{
-                display: "flex", justifyContent: "space-between", alignItems: "center",
-                marginBottom: 16, padding: "0 8px",
-              }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                 <div>
                   {isDrawer && word && (
-                    <div style={{
-                      padding: "10px 20px", background: "rgba(100,255,218,0.1)",
-                      borderRadius: 10, border: "1px solid #64ffda",
-                    }}>
+                    <div style={{ padding: "10px 20px", background: "rgba(100,255,218,0.1)", borderRadius: 10, border: "1px solid #64ffda" }}>
                       <div style={{ fontSize: 11, color: "#64ffda", fontWeight: 700 }}>YOUR WORD</div>
                       <div style={{ fontSize: 24, fontWeight: 900, letterSpacing: 4 }}>{word}</div>
                     </div>
@@ -452,27 +510,20 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
                     </div>
                   )}
                   {revealWord && (
-                    <div style={{
-                      padding: "10px 20px", background: "rgba(255,217,61,0.1)",
-                      borderRadius: 10, border: "1px solid #ffd93d",
-                    }}>
-                      <div style={{ fontSize: 11, color: "#ffd93d", fontWeight: 700 }}>THE WORD WAS</div>
-                      <div style={{ fontSize: 24, fontWeight: 900, letterSpacing: 4, color: "#ffd93d" }}>
-                        {revealWord}
+                    <div style={{ padding: "10px 20px", background: "rgba(255,217,61,0.1)", borderRadius: 10, border: "1px solid #ffd93d" }}>
+                      <div style={{ fontSize: 11, color: "#ffd93d", fontWeight: 700 }}>
+                        {timerPhase === "reveal" ? "THE WORD WAS" : "CORRECT!"}
                       </div>
+                      <div style={{ fontSize: 24, fontWeight: 900, letterSpacing: 4, color: "#ffd93d" }}>{revealWord}</div>
                     </div>
                   )}
                 </div>
-                <CircularTimer
-                  remaining={timer}
-                  total={timerPhase === "reveal" ? 5 : 60}
-                  phase={timerPhase === "reveal" ? "reveal" : "active"}
-                />
+                <CircularTimer remaining={timer} total={timerPhase === "reveal" ? 5 : 60} phase={timerPhase} />
               </div>
 
-              <DrawCanvas isDrawer={isDrawer && timerPhase !== "reveal" && !revealWord} send={send} />
+              <DrawCanvas isDrawer={isDrawer && timerPhase === "active" && !revealWord} send={send} />
 
-              {!isDrawer && timerPhase !== "reveal" && !revealWord && !matchResult && (
+              {!isDrawer && timerPhase === "active" && !revealWord && !matchResult && (
                 <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                   <input
                     value={pictionaryInput}
@@ -491,34 +542,22 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
                       send({ action: "pictionary_guess", guess: pictionaryInput.trim() });
                       setPictionaryInput("");
                     }
-                  }} style={actionBtnStyle}>
-                    Guess
-                  </button>
+                  }} style={actionBtnStyle}>Guess</button>
                 </div>
               )}
 
               {matchResult && <MatchResultCard result={matchResult} user={user} onLeave={onLeave} />}
             </div>
 
-            {/* Sidebar */}
             <div>
-              <div style={{
-                background: "#12122a", borderRadius: 12, padding: 16,
-                border: "1px solid #2a2a4a", marginBottom: 16,
-              }}>
+              <div style={{ background: "#12122a", borderRadius: 12, padding: 16, border: "1px solid #2a2a4a", marginBottom: 16 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: "#ffd93d", marginBottom: 8, textTransform: "uppercase" }}>
                   Scores · Round {round}
                 </div>
                 {players.map((p) => (
-                  <div key={p.id} style={{
-                    display: "flex", justifyContent: "space-between",
-                    padding: "6px 0", fontSize: 14,
-                    color: p.id === drawer ? "#64ffda" : "#ccc",
-                  }}>
-                    <span>{p.name} {p.id === drawer ? "🎨" : ""} {p.id === host ? "👑" : ""}</span>
-                    <span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>
-                      {scores[p.id] || 0}
-                    </span>
+                  <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 14, color: p.id === drawer ? "#64ffda" : "#ccc" }}>
+                    <span>{p.name} {p.id === drawer ? "🎨" : ""}</span>
+                    <span style={{ fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>{scores[p.id] || 0}</span>
                   </div>
                 ))}
               </div>
@@ -528,7 +567,6 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
         </div>
       )}
 
-      {/* Chat for non-pictionary */}
       {status === "playing" && mode !== "pictionary" && (
         <div style={{ maxWidth: 400, margin: "24px auto 0" }}>
           <ChatPanel messages={chatMessages} onSend={(msg) => send({ action: "chat", message: msg })} />
@@ -538,22 +576,24 @@ export default function GameRoom({ user, roomId, send, gameMessages, onLeave }) 
   );
 }
 
-// ── Match Result ────────────────────────────────────────────────────────
 function MatchResultCard({ result, user, onLeave }) {
+  const isWinner = result.winner === user.user_id ||
+    (result.winners && result.winners.some(w => w.id === user.user_id));
+
   return (
-    <div style={{
-      textAlign: "center", marginTop: 32, padding: 32,
-      background: "#12122a", borderRadius: 16, border: "1px solid #64ffda",
-    }}>
-      <div style={{ fontSize: 48, marginBottom: 12 }}>
-        {result.winner === user.user_id ? "🏆" : "😔"}
-      </div>
-      <h2 style={{
-        fontSize: 28, fontWeight: 900, marginBottom: 8,
-        color: result.winner === user.user_id ? "#64ffda" : "#ff6b6b",
-      }}>
-        {result.winner === user.user_id ? "Victory!" : `${result.winnerName} Wins!`}
+    <div style={{ textAlign: "center", marginTop: 32, padding: 32, background: "#12122a", borderRadius: 16, border: "1px solid #64ffda" }}>
+      <div style={{ fontSize: 48, marginBottom: 12 }}>{isWinner ? "🏆" : result.terminated ? "⚠️" : "😔"}</div>
+      {result.terminated && result.reason && (
+        <div style={{ color: "#ffd93d", fontSize: 14, marginBottom: 12 }}>{result.reason}</div>
+      )}
+      <h2 style={{ fontSize: 28, fontWeight: 900, marginBottom: 8, color: isWinner ? "#64ffda" : "#ff6b6b" }}>
+        {isWinner ? "Victory!" : result.winnerName ? `${result.winnerName} Wins!` : "Game Over"}
       </h2>
+      {result.winners && result.winners.length > 1 && (
+        <div style={{ marginTop: 8, fontSize: 14, color: "#ccc" }}>
+          Winners: {result.winners.map(w => w.name).join(", ")}
+        </div>
+      )}
       {result.rankings && (
         <div style={{ marginTop: 16 }}>
           {result.rankings.map((r, i) => (
@@ -563,37 +603,15 @@ function MatchResultCard({ result, user, onLeave }) {
           ))}
         </div>
       )}
-      <button onClick={onLeave} style={{
-        marginTop: 20, padding: "12px 32px", borderRadius: 10,
-        border: "none", background: "#7c4dff", color: "#fff",
-        fontWeight: 700, cursor: "pointer", fontSize: 15,
-      }}>
+      <button onClick={onLeave} style={{ marginTop: 20, padding: "12px 32px", borderRadius: 10, border: "none", background: "#7c4dff", color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 15 }}>
         Back to Lobby
       </button>
     </div>
   );
 }
 
-const containerStyle = {
-  minHeight: "100vh",
-  background: "linear-gradient(135deg, #0a0a1a 0%, #1a0a2e 50%, #0a1a2e 100%)",
-  color: "#fff", fontFamily: "'Space Grotesk', sans-serif",
-};
-const backBtnStyle = {
-  padding: "8px 16px", borderRadius: 8, border: "1px solid #333",
-  background: "transparent", color: "#888", fontWeight: 600, cursor: "pointer", fontSize: 13,
-};
-const startBtnStyle = {
-  padding: "14px 40px", borderRadius: 12, border: "none",
-  background: "linear-gradient(135deg, #64ffda, #7c4dff)",
-  color: "#000", fontWeight: 800, fontSize: 16, cursor: "pointer", letterSpacing: 1,
-};
-const actionBtnStyle = {
-  padding: "12px 24px", borderRadius: 10, border: "none",
-  background: "#64ffda", color: "#000", fontWeight: 800, fontSize: 15, cursor: "pointer",
-};
-const guessInputStyle = {
-  flex: 1, padding: "12px 16px", borderRadius: 10,
-  background: "#0a0a1a", border: "1px solid #333",
-  color: "#fff", fontSize: 15, outline: "none",
-};
+const containerStyle = { minHeight: "100vh", background: "linear-gradient(135deg, #0a0a1a 0%, #1a0a2e 50%, #0a1a2e 100%)", color: "#fff", fontFamily: "'Space Grotesk', sans-serif" };
+const backBtnStyle = { padding: "8px 16px", borderRadius: 8, border: "1px solid #333", background: "transparent", color: "#888", fontWeight: 600, cursor: "pointer", fontSize: 13 };
+const startBtnStyle = { padding: "14px 40px", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #64ffda, #7c4dff)", color: "#000", fontWeight: 800, fontSize: 16, cursor: "pointer", letterSpacing: 1 };
+const actionBtnStyle = { padding: "12px 24px", borderRadius: 10, border: "none", background: "#64ffda", color: "#000", fontWeight: 800, fontSize: 15, cursor: "pointer" };
+const guessInputStyle = { flex: 1, padding: "12px 16px", borderRadius: 10, background: "#0a0a1a", border: "1px solid #333", color: "#fff", fontSize: 15, outline: "none" };
