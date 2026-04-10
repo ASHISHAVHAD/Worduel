@@ -4,7 +4,7 @@ import os
 # PostgreSQL connection
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://wordueldb:ZBFslDpWcmKBg5WoCB8OqQIj0N0eCLW2@dpg-d7af1hshg0os73ehs4s0-a/wordueldb"
+    "postgresql://worduel_user:worduel_pass@localhost:5432/worduel_db"
 )
 
 # App settings
